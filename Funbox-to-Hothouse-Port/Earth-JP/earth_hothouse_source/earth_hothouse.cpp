@@ -57,11 +57,14 @@ static Decimator2 decimate;
 static Interpolator interpolate;
 static const auto sample_rate_temp = 48000;
 static OctaveGenerator octave(sample_rate_temp / resample_factor);
-static q::highshelf eq1(-11, 140_Hz, sample_rate_temp);
+static q::highshelf eq1(-20, 100_Hz, sample_rate_temp);
 static q::lowshelf eq2(5, 160_Hz, sample_rate_temp);
+static q::lowshelf eq3(-11, 160_Hz, sample_rate_temp);
 float buff[6];
 float buff_out[6];
 int bin_counter = 0;
+int octaveEQ = 0;
+int addOctave = 0;
 
 float current_predelay, current_moddepth, current_modspeed, current_ODswell, current_freezeDecay;
 float setTimeScale, current_timeScale, setOD;
@@ -106,11 +109,11 @@ void updateSwitch2()
 void updateSwitch3() // What will we do with this one?
 {
     if (toggleValues[2] == 0) {
-        
-    } else if (toggleValues[2] == 2) {
-        
+        addOctave = 0;
+    } else if (toggleValues[2] == 1) {
+        addOctave = 1;
     } else {
-        
+        addOctave = 3;
     }
 }
 
@@ -263,79 +266,122 @@ static void AudioCallback(AudioHandle::InputBuffer in,
     float inputL;
     float inputR;
 
-    if(!bypass) {
-        for (size_t i = 0; i < size; i++)
-        {
-            processSmoothedParameters();
-            inputL = in[0][i];
-            inputR = in[1][i];
-            float reverb_in_L = inputL, reverb_in_R = inputR;
+    for (size_t i = 0; i < size; i++)
+    {
+        processSmoothedParameters();
+        inputL = in[0][i];
+        inputR = in[1][i];
+        // Remove this for full stereo input
+        //inputL = inputR = in[0][i];
+        
+        float   reverb_in_L = inputL,
+                reverb_in_R = inputR,
+                od_in_L     = inputL,
+                od_in_R     = inputR;
 
-            if (effect_mode != 0 ) {
-                // Buffer input for octave processing
-                buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
-            
-                // Process octave every 6 samples
-                if (bin_counter == 5) {
-                    std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
-                    const auto sample = decimate(in_chunk); 
-                    
-                    float octave_mix = 0.0;
-                    octave.update(sample);
-                    
-                    if (effect_mode == 1 || effect_mode == 2) {
-                        octave_mix += octave.up1() * 2.0;
+
+        // Overdrive is always on, but amount controlled by knob 4
+        float driveValue = .3f + overdriveAmount * 0.5f;
+        overdrive.SetDrive(driveValue);
+        overdrive2.SetDrive(driveValue);
+
+        float effectLeftOut = 0.0f;
+        float effectRightOut = 0.0f;
+        float leftOutput = 0.0f;
+        float rightOutput = 0.0f;
+
+        if(effect_mode == 0 ) { // Reverb into overdrive
+            /*--------- Octave and tails START: ---------*/
+            if(!bypass) {
+                if (addOctave > 0) {
+                    // Buffer input for octave processing
+                    buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
+                
+                    // Process octave every 6 samples
+                    if (bin_counter == 5) {
+                        std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
+                        const auto sample = decimate(in_chunk); 
+                        octave.update(sample);
+                        float octave_mix = octave.up1() * 2.0f * addOctave;
+                        
+                        auto out_chunk = interpolate(octave_mix);
+                        for (size_t j = 0; j < out_chunk.size(); ++j) {
+                            float mix = eq2(eq1(out_chunk[j]));
+                            float dryLevel = 0.75f;
+                            mix += dryLevel * buff[j];
+                            buff_out[j] = mix;
+                        }
                     }
-                    if (effect_mode == 2) {
-                        octave_mix += octave.down1() * 2.0;
-                        octave_mix += octave.down2();
-                    }
-                    
-                    auto out_chunk = interpolate(octave_mix);
-                    for (size_t j = 0; j < out_chunk.size(); ++j) {
-                        float mix = eq2(eq1(out_chunk[j]));
-                        float dryLevel = 0.5;
-                        mix += dryLevel * buff[j];
-                        buff_out[j] = mix;
+
+                    if(bin_counter < 6) {
+                        reverb_in_L = buff_out[bin_counter];
+                        reverb_in_R = buff_out[bin_counter];
                     }
                 }
-
-                if(bin_counter < 6) {
-                    reverb_in_L = buff_out[bin_counter];
-                    reverb_in_R = buff_out[bin_counter];
-                }
+            } else {
+                reverb_in_L = 0.0f;
+                reverb_in_R = 0.0f;
+                dryMix = 1.0f;
             }
-            
-            // Process reverb
+            /*--------- Octave and tails END. ---------*/
             reverb.process(reverb_in_L, reverb_in_R);
-            
-            // Get outputs
-            float effectLeftOut = reverb.getLeftOutput();  
-            float effectRightOut = reverb.getRightOutput();
-            
-            // Overdrive is always on, but amount controlled by knob 4
-            overdrive.SetDrive(.35f + overdriveAmount * 0.25f);
-            overdrive2.SetDrive(.35f + overdriveAmount * 0.25f);
-            effectLeftOut = overdrive.Process(effectLeftOut) * (1 - overdriveAmount * .5f);
-            effectRightOut = overdrive2.Process(effectRightOut) * (1 - overdriveAmount * .5f);
-            
-            float leftOutput = inputL * dryMix + effectLeftOut * wetMix;
-            float rightOutput = inputR * dryMix + effectRightOut * wetMix;
-            
-            out[0][i] = leftOutput;
-            out[1][i] = rightOutput;
-            
-            // Update bin counter
-            bin_counter++;
-            if (bin_counter >= 6) {
-                bin_counter = 0;
+            effectLeftOut = reverb.getLeftOutput();  
+            effectRightOut = reverb.getRightOutput();
+            effectLeftOut =   overdrive.Process( eq3(effectLeftOut) ) *  (1 - overdriveAmount * .9f);
+            effectRightOut = overdrive2.Process( eq3(effectRightOut) ) * (1 - overdriveAmount * .9f);
+        } else if(effect_mode == 1 ) {               // Overdrive into reverb
+            reverb_in_L = overdrive.Process(  (od_in_L) ) * (1 - overdriveAmount * .9f);
+            reverb_in_R = overdrive2.Process( (od_in_R) ) * (1 - overdriveAmount * .9f);
+            /*--------- Octave and tails START: ---------*/
+            if(!bypass) {
+                inputL = reverb_in_L;
+                inputR = reverb_in_R;
+                if (addOctave > 0) {
+                    // Buffer input for octave processing
+                    buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
+                
+                    // Process octave every 6 samples
+                    if (bin_counter == 5) {
+                        std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
+                        const auto sample = decimate(in_chunk); 
+                        octave.update(sample);
+                        float octave_mix = octave.up1() * 2.0f * addOctave;
+                        
+                        auto out_chunk = interpolate(octave_mix);
+                        for (size_t j = 0; j < out_chunk.size(); ++j) {
+                            float mix = eq2(eq1(out_chunk[j]));
+                            float dryLevel = 0.75f;
+                            mix += dryLevel * buff[j];
+                            buff_out[j] = mix;
+                        }
+                    }
+
+                    if(bin_counter < 6) {
+                        reverb_in_L += buff_out[bin_counter];
+                        reverb_in_R += buff_out[bin_counter];
+                    }
+                }
+            } else {
+                reverb_in_L = 0.0f;
+                reverb_in_R = 0.0f;
+                dryMix = 1.0f;
             }
+            /*--------- Octave and tails END. ---------*/
+            reverb.process(reverb_in_L, reverb_in_R);
+            effectLeftOut = reverb.getLeftOutput();  
+            effectRightOut = reverb.getRightOutput();
         }
-    } else {
-        for (size_t i = 0; i < size; i++)
-        {
-            out[0][i] = in[0][i];
-            out[1][i] = in[1][i];
+        leftOutput = inputL * dryMix + effectLeftOut * wetMix;
+        rightOutput = inputR * dryMix + effectRightOut * wetMix;
+        
+        
+        out[0][i] = leftOutput;
+        out[1][i] = rightOutput;
+        
+        // Update bin counter
+        bin_counter++;
+        if (bin_counter >= 6) {
+            bin_counter = 0;
         }
     }
 }
@@ -464,7 +510,8 @@ int main(void)
     while(1)
     {
         // Check for bootloader reset in main loop
-        if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 2000)
+        // JP: Less easy to trigger accidentally if both footswitches are involved:
+        if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 2000 && hw.switches[Hothouse::FOOTSWITCH_2].TimeHeldMs() >= 2000)
         {
             hw.StopAudio();
             hw.StopAdc();
