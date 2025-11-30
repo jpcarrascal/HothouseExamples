@@ -71,8 +71,10 @@ int addOctave = 0;
 float current_predelay, current_moddepth, current_modspeed, current_ODswell, current_freezeDecay;
 float setTimeScale, current_timeScale, setOD;
 
-Overdrive overdrive;
-Overdrive overdrive2;
+Overdrive overdrivePre;
+Overdrive overdrivePre2;
+Overdrive overdrivePost;
+Overdrive overdrivePost2;
 bool odOn = false;
 
 void ledBlink(Led& led)
@@ -213,8 +215,8 @@ void processSmoothedParameters()
 
     if (odOn) {
         fonepole(current_ODswell, setOD, .000015f);
-        overdrive.SetDrive(current_ODswell);
-        overdrive2.SetDrive(current_ODswell);
+        overdrivePre.SetDrive(current_ODswell);
+        overdrivePre2.SetDrive(current_ODswell);
         if (current_ODswell < 0.41 && !fw1_held) {
             odOn = false;
         }
@@ -256,9 +258,10 @@ static void AudioCallback(AudioHandle::InputBuffer in,
     float vpredelay = newExpressionValues[0];
     float vmix = newExpressionValues[1];
     float vdecay = newExpressionValues[2];
-    float vmoddepth = newExpressionValues[3];
-    float vmodspeed = newExpressionValues[3];
-    float overdriveAmount = newExpressionValues[4]; // HERE:
+    //float vmoddepth = newExpressionValues[3];
+    //float vmodspeed = newExpressionValues[3];
+    float overdrivePostAmount = newExpressionValues[3]; // HERE:
+    float overdrivePreAmount = newExpressionValues[4]; // HERE:
     float vdamp = newExpressionValues[5];
 
     if (pmix != vmix) {
@@ -283,13 +286,13 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         pdecay = vdecay;
     }
 
-    if (knobMoved(pmoddepth, vmoddepth)) {
+    /*if (knobMoved(pmoddepth, vmoddepth)) {
         pmoddepth = vmoddepth;
     }
 
     if (knobMoved(pmodspeed, vmodspeed)) {
         pmodspeed = vmodspeed;
-    }
+    }*/
 
     if (knobMoved(pdamp, vdamp)) {
         reverb.setInputFilterHighCutoffPitch(10. - (7. * vdamp));
@@ -314,12 +317,15 @@ static void AudioCallback(AudioHandle::InputBuffer in,
 
 
         // Overdrive is always on, but amount controlled by knob 4
-        float driveValue = .3f + overdriveAmount * 0.5f;
-        //float driveLevelCompensantion = 1.0f - (overdriveAmount * 0.9f);
-        //float driveLevelCompensantion = 1.0f - (overdriveAmount * overdriveAmount * 2.8f - 0.1296f);
-        float driveLevelCompensantion = 1.0f - driveValue;
-        overdrive.SetDrive(driveValue);
-        overdrive2.SetDrive(driveValue);
+        float drivePreValue = .3f + overdrivePreAmount * 0.5f;
+        float drivePreLevelCompensantion = 1.0f - drivePreValue;
+        overdrivePre.SetDrive(drivePreValue);
+        overdrivePre2.SetDrive(drivePreValue);
+
+        float drivePostValue = .3f + overdrivePostAmount * 0.5f;
+        float drivePostLevelCompensantion = 1.0f - drivePostValue;
+        overdrivePost.SetDrive(drivePostValue);
+        overdrivePost2.SetDrive(drivePostValue);
 
         float octaveOutL = 0.0f;
         float octaveOutR = 0.0f;
@@ -328,9 +334,9 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         float leftOutput = 0.0f;
         float rightOutput = 0.0f;
 
-        if((effect_mode == 1 || effect_mode == 2) && driveActive == true) {
-            reverb_in_L = overdrive.Process(  (inputL) ) * driveLevelCompensantion;
-            reverb_in_R = overdrive2.Process( (inputR) ) * driveLevelCompensantion;
+        if(driveActive == true) {
+            reverb_in_L = overdrivePre.Process(  (inputL) ) * drivePreLevelCompensantion;
+            reverb_in_R = overdrivePre2.Process( (inputR) ) * drivePreLevelCompensantion;
         } else {
             reverb_in_L = inputL;
             reverb_in_R = inputR;
@@ -367,7 +373,7 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         
         /*--------- Octave END. ---------*/
 
-        if((effect_mode == 1 || effect_mode == 2) && (reverbActive == true || driveActive == true)) {
+        if((reverbActive == true || driveActive == true)) {
             inputL = reverb_in_L;
             inputR = reverb_in_R;
         }
@@ -378,10 +384,8 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         reverb.process(reverb_in_L + octaveOutL, reverb_in_R + octaveOutR);
         effectLeftOut = reverb.getLeftOutput();  
         effectRightOut = reverb.getRightOutput();
-        if((effect_mode == 0 || effect_mode == 2) && driveActive == true) {
-            effectLeftOut =  overdrive.Process(  eq3(effectLeftOut) )  * driveLevelCompensantion;
-            effectRightOut = overdrive2.Process( eq3(effectRightOut) ) * driveLevelCompensantion;
-        }
+        effectLeftOut =  overdrivePost.Process(  eq3(effectLeftOut) )  * drivePostLevelCompensantion;
+        effectRightOut = overdrivePost2.Process( eq3(effectRightOut) ) * drivePostLevelCompensantion;
 
         if(reverbActive == true) {
             leftOutput =  inputL * dryMix + effectLeftOut * wetMix;
@@ -481,10 +485,17 @@ int main(void)
         buff_out[j] = 0.0;
     }
 
-    overdrive.Init();
-    overdrive.SetDrive(0.4);
-    overdrive2.Init();
-    overdrive2.SetDrive(0.4);
+    overdrivePre.Init();
+    overdrivePre.SetDrive(0.4);
+    overdrivePre2.Init();
+    overdrivePre2.SetDrive(0.4);
+
+    overdrivePost.Init();
+    overdrivePost.SetDrive(0.4);
+    overdrivePost2.Init();
+    overdrivePost2.SetDrive(0.4);
+
+
     odOn = false;
 
     pdamp = 0.5f;
