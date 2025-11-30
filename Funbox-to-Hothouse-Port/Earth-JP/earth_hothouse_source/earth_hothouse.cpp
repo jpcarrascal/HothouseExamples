@@ -27,7 +27,8 @@ using namespace clevelandmusicco;
 // Declare hardware
 Hothouse hw;
 float pdamp, pmix, pdecay, pmoddepth, pmodspeed, ppredelay;
-bool bypass;
+bool reverbActive;
+bool driveActive;;
 Led led1, led2;
 
 float dryMix = 0.5f;
@@ -50,8 +51,9 @@ float pknobValues[6];
 
 Dattorro reverb(48000, 16, 4.0);
 int effect_mode = 0;
-bool fw2_held = false;
+bool fw1_held = false;
 bool freeze = false;
+bool freezeHold = false;
 
 static Decimator2 decimate;
 static Interpolator interpolate;
@@ -72,6 +74,18 @@ float setTimeScale, current_timeScale, setOD;
 Overdrive overdrive;
 Overdrive overdrive2;
 bool odOn = false;
+
+void ledBlink(Led& led)
+{
+    static bool ledState = false;
+    static int counter = 0;
+    counter++;
+    if (counter >= 100) { // Blink every 200 calls (~200ms if called every 1ms)
+        ledState = !ledState;
+        led.Set(ledState ? 1.0f : 0.0f);
+        counter = 0;
+    }
+}
 
 bool knobMoved(float old_value, float new_value)
 {
@@ -119,26 +133,47 @@ void updateSwitch3() // What will we do with this one?
 
 void UpdateButtons()
 {
-    // Simple bypass toggle
+    // Footswitch 1:
+    // * Switch reverb on/off with short press (after releasing switch)
+    // * Hold to freeze reverb. Two behaviors:
+    //   - If reverb is active, freeze continues accumulating input
+    //   - If reverb is bypassed, freeze holds last buffer content
+    if(hw.switches[Hothouse::FOOTSWITCH_1].FallingEdge())
+    {
+        if(!freezeHold) {
+            // Turn reverb off
+            reverbActive = !reverbActive;
+            led1.Set(reverbActive ? 1.0f : 0.0f);
+            freeze = false;
+            freezeHold = false;
+        } else if(freezeHold) {
+            // Finish freeze hold, do not change reverb state
+            freeze = false;
+            freezeHold = false;
+            led1.Set(reverbActive ? 1.0f : 0.0f);
+        }
+    }
+    
+    if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 1000) {
+        freezeHold = true;
+    }
+
     if(hw.switches[Hothouse::FOOTSWITCH_1].RisingEdge())
     {
-        bypass = !bypass;
-        led1.Set(bypass ? 0.0f : 1.0f);
-    }
-
-    // Footswitch 2 - momentary
-    bool fs2_pressed = hw.switches[Hothouse::FOOTSWITCH_2].Pressed();
-    
-    if (fs2_pressed && !fw2_held) { // Now fs2 only sets freeze
-        fw2_held = true;
         freeze = true;
     }
-    else if (!fs2_pressed && fw2_held) {
-        fw2_held = false;
-        freeze = false;
+
+    if(freezeHold) {
+        ledBlink(led1);
     }
 
-    led2.Set(fw2_held ? 1.0f : 0.0f);
+    // Footswitch 2:
+    if(hw.switches[Hothouse::FOOTSWITCH_2].RisingEdge())
+    {
+        driveActive = !driveActive;
+        led2.Set(driveActive ? 1.0f : 0.0f);
+    }
+    
 }
 
 void UpdateSwitches()
@@ -180,7 +215,7 @@ void processSmoothedParameters()
         fonepole(current_ODswell, setOD, .000015f);
         overdrive.SetDrive(current_ODswell);
         overdrive2.SetDrive(current_ODswell);
-        if (current_ODswell < 0.41 && !fw2_held) {
+        if (current_ODswell < 0.41 && !fw1_held) {
             odOn = false;
         }
     }
@@ -272,107 +307,89 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         inputL = in[0][i];
         inputR = in[1][i];
         // Remove this for full stereo input
-        //inputL = inputR = in[0][i];
+        inputL = inputR = in[0][i];
         
         float   reverb_in_L = inputL,
-                reverb_in_R = inputR,
-                od_in_L     = inputL,
-                od_in_R     = inputR;
+                reverb_in_R = inputR;
 
 
         // Overdrive is always on, but amount controlled by knob 4
         float driveValue = .3f + overdriveAmount * 0.5f;
+        //float driveLevelCompensantion = 1.0f - (overdriveAmount * 0.9f);
+        //float driveLevelCompensantion = 1.0f - (overdriveAmount * overdriveAmount * 2.8f - 0.1296f);
+        float driveLevelCompensantion = 1.0f - driveValue;
         overdrive.SetDrive(driveValue);
         overdrive2.SetDrive(driveValue);
 
+        float octaveOutL = 0.0f;
+        float octaveOutR = 0.0f;
         float effectLeftOut = 0.0f;
         float effectRightOut = 0.0f;
         float leftOutput = 0.0f;
         float rightOutput = 0.0f;
 
-        if(effect_mode == 0 ) { // Reverb into overdrive
-            /*--------- Octave and tails START: ---------*/
-            if(!bypass) {
-                if (addOctave > 0) {
-                    // Buffer input for octave processing
-                    buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
-                
-                    // Process octave every 6 samples
-                    if (bin_counter == 5) {
-                        std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
-                        const auto sample = decimate(in_chunk); 
-                        octave.update(sample);
-                        float octave_mix = octave.up1() * 2.0f * addOctave;
-                        
-                        auto out_chunk = interpolate(octave_mix);
-                        for (size_t j = 0; j < out_chunk.size(); ++j) {
-                            float mix = eq2(eq1(out_chunk[j]));
-                            float dryLevel = 0.75f;
-                            mix += dryLevel * buff[j];
-                            buff_out[j] = mix;
-                        }
-                    }
-
-                    if(bin_counter < 6) {
-                        reverb_in_L = buff_out[bin_counter];
-                        reverb_in_R = buff_out[bin_counter];
-                    }
-                }
-            } else {
-                reverb_in_L = 0.0f;
-                reverb_in_R = 0.0f;
-                dryMix = 1.0f;
-            }
-            /*--------- Octave and tails END. ---------*/
-            reverb.process(reverb_in_L, reverb_in_R);
-            effectLeftOut = reverb.getLeftOutput();  
-            effectRightOut = reverb.getRightOutput();
-            effectLeftOut =   overdrive.Process( eq3(effectLeftOut) ) *  (1 - overdriveAmount * .9f);
-            effectRightOut = overdrive2.Process( eq3(effectRightOut) ) * (1 - overdriveAmount * .9f);
-        } else if(effect_mode == 1 ) {               // Overdrive into reverb
-            reverb_in_L = overdrive.Process(  (od_in_L) ) * (1 - overdriveAmount * .9f);
-            reverb_in_R = overdrive2.Process( (od_in_R) ) * (1 - overdriveAmount * .9f);
-            /*--------- Octave and tails START: ---------*/
-            if(!bypass) {
-                inputL = reverb_in_L;
-                inputR = reverb_in_R;
-                if (addOctave > 0) {
-                    // Buffer input for octave processing
-                    buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
-                
-                    // Process octave every 6 samples
-                    if (bin_counter == 5) {
-                        std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
-                        const auto sample = decimate(in_chunk); 
-                        octave.update(sample);
-                        float octave_mix = octave.up1() * 2.0f * addOctave;
-                        
-                        auto out_chunk = interpolate(octave_mix);
-                        for (size_t j = 0; j < out_chunk.size(); ++j) {
-                            float mix = eq2(eq1(out_chunk[j]));
-                            float dryLevel = 0.75f;
-                            mix += dryLevel * buff[j];
-                            buff_out[j] = mix;
-                        }
-                    }
-
-                    if(bin_counter < 6) {
-                        reverb_in_L += buff_out[bin_counter];
-                        reverb_in_R += buff_out[bin_counter];
-                    }
-                }
-            } else {
-                reverb_in_L = 0.0f;
-                reverb_in_R = 0.0f;
-                dryMix = 1.0f;
-            }
-            /*--------- Octave and tails END. ---------*/
-            reverb.process(reverb_in_L, reverb_in_R);
-            effectLeftOut = reverb.getLeftOutput();  
-            effectRightOut = reverb.getRightOutput();
+        if((effect_mode == 1 || effect_mode == 2) && driveActive == true) {
+            reverb_in_L = overdrive.Process(  (inputL) ) * driveLevelCompensantion;
+            reverb_in_R = overdrive2.Process( (inputR) ) * driveLevelCompensantion;
+        } else {
+            reverb_in_L = inputL;
+            reverb_in_R = inputR;
         }
-        leftOutput = inputL * dryMix + effectLeftOut * wetMix;
-        rightOutput = inputR * dryMix + effectRightOut * wetMix;
+
+        /*--------- Octave START: ---------*/
+        if(reverbActive == true) {
+            if (addOctave > 0) {
+                // Buffer input for octave processing
+                buff[bin_counter] = inputL * 0.5f + inputR * 0.5f;
+            
+                // Process octave every 6 samples
+                if (bin_counter == 5) {
+                    std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
+                    const auto sample = decimate(in_chunk); 
+                    octave.update(sample);
+                    float octave_mix = octave.up1() * 2.0f * addOctave;
+                    
+                    auto out_chunk = interpolate(octave_mix);
+                    for (size_t j = 0; j < out_chunk.size(); ++j) {
+                        float mix = eq2(eq1(out_chunk[j]));
+                        float dryLevel = 0.75f;
+                        mix += dryLevel * buff[j];
+                        buff_out[j] = mix;
+                    }
+                }
+
+                if(bin_counter < 6) {
+                    octaveOutL = buff_out[bin_counter];
+                    octaveOutR = buff_out[bin_counter];
+                }
+            }
+        }
+        
+        /*--------- Octave END. ---------*/
+
+        if((effect_mode == 1 || effect_mode == 2) && (reverbActive == true || driveActive == true)) {
+            inputL = reverb_in_L;
+            inputR = reverb_in_R;
+        }
+        if(reverbActive == false) {
+            reverb_in_L = 0.0f;
+            reverb_in_R = 0.0f;
+        }
+        reverb.process(reverb_in_L + octaveOutL, reverb_in_R + octaveOutR);
+        effectLeftOut = reverb.getLeftOutput();  
+        effectRightOut = reverb.getRightOutput();
+        if((effect_mode == 0 || effect_mode == 2) && driveActive == true) {
+            effectLeftOut =  overdrive.Process(  eq3(effectLeftOut) )  * driveLevelCompensantion;
+            effectRightOut = overdrive2.Process( eq3(effectRightOut) ) * driveLevelCompensantion;
+        }
+
+        if(reverbActive == true) {
+            leftOutput =  inputL * dryMix + effectLeftOut * wetMix;
+            rightOutput = inputR * dryMix + effectRightOut * wetMix;
+        } else {
+            leftOutput =  inputL + effectLeftOut * wetMix;
+            rightOutput = inputR + effectRightOut * wetMix;
+        }
         
         
         out[0][i] = leftOutput;
@@ -499,7 +516,8 @@ int main(void)
 
     led1.Init(hw.seed.GetPin(Hothouse::LED_1), false);
     led1.Update();
-    bypass = true;
+    reverbActive = false;
+    driveActive = false;
 
     led2.Init(hw.seed.GetPin(Hothouse::LED_2), false);
     led2.Update();
