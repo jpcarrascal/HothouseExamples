@@ -50,6 +50,7 @@ bool first_start;
 float pknobValues[6];
 
 Dattorro reverb(48000, 16, 4.0);
+int reverbSampleRate = 48000;
 int effect_mode = 0;
 bool fw1_held = false;
 bool freeze = false;
@@ -114,11 +115,11 @@ void updateSwitch1()
 void updateSwitch2() 
 {
     if (toggleValues[1] == 0) {
-        effect_mode = 0;
-    } else if (toggleValues[1] == 2) {
-        effect_mode = 2;
+
+    } else if (toggleValues[1] == 1) {
+
     } else {
-        effect_mode = 1;
+
     }
 }
 
