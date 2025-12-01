@@ -55,6 +55,8 @@ int effect_mode = 0;
 bool fw1_held = false;
 bool freeze = false;
 bool freezeHold = false;
+bool reverbStateBeforeFreeze = false;
+bool justExitedFreezeHold = false;
 
 static Decimator2 decimate;
 static Interpolator interpolate;
@@ -137,36 +139,49 @@ void updateSwitch3() // What will we do with this one?
 void UpdateButtons()
 {
     // Footswitch 1:
-    // * Switch reverb on/off with short press (after releasing switch)
-    // * Hold to freeze reverb. Two behaviors:
-    //   - If reverb is active, freeze continues accumulating input
-    //   - If reverb is bypassed, freeze holds last buffer content
-    if(hw.switches[Hothouse::FOOTSWITCH_1].FallingEdge())
-    {
-        if(!freezeHold) {
-            // Turn reverb off
-            reverbActive = !reverbActive;
-            led1.Set(reverbActive ? 1.0f : 0.0f);
-            freeze = false;
-            freezeHold = false;
-        } else if(freezeHold) {
-            // Finish freeze hold, do not change reverb state
-            freeze = false;
-            freezeHold = false;
-            led1.Set(reverbActive ? 1.0f : 0.0f);
-        }
-    }
-    
-    if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 1000) {
-        freezeHold = true;
-    }
+    // * Switch reverb on/off with short press (after releasing switch)  
+    // * Hold to freeze reverb and enter freezeHold mode
+    // * freezeHold persists after button release with continuous freeze
+    // * Short press while in freezeHold exits freezeHold (maintaining current reverb state)
 
     if(hw.switches[Hothouse::FOOTSWITCH_1].RisingEdge())
     {
-        freeze = true;
+        if(!freezeHold) {
+            // Normal press - start freeze (don't save state yet)
+            freeze = true;
+        } else {
+            // Short press while in freezeHold - exit freezeHold, stop freeze, restore saved reverb state
+            freezeHold = false;
+            freeze = false;
+            reverbActive = reverbStateBeforeFreeze;
+            led1.Set(reverbActive ? 1.0f : 0.0f);
+            justExitedFreezeHold = true;  // Prevent FallingEdge from toggling
+        }
     }
 
+    if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 1000 && !freezeHold) {
+        // Save reverb state when entering freezeHold
+        reverbStateBeforeFreeze = reverbActive;
+        freezeHold = true;
+    }
+
+    if(hw.switches[Hothouse::FOOTSWITCH_1].FallingEdge())
+    {
+        if(justExitedFreezeHold) {
+            // Just exited freezeHold, don't toggle
+            justExitedFreezeHold = false;
+        } else if(!freezeHold) {
+            // Short press - toggle reverb on/off normally
+            reverbActive = !reverbActive;
+            led1.Set(reverbActive ? 1.0f : 0.0f);
+            freeze = false;
+        }
+        // If freezeHold is true, do nothing on release - keep freeze active
+    }
+
+    // During freezeHold, maintain freeze and blink LED
     if(freezeHold) {
+        freeze = true;  // Keep freeze active during freezeHold
         ledBlink(led1);
     }
 
