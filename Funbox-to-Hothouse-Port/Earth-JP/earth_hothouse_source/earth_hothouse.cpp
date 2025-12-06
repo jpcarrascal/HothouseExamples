@@ -271,14 +271,15 @@ static void AudioCallback(AudioHandle::InputBuffer in,
     float vexpression = 0.5f;
     expHandler.Process(vexpression, knobValues, newExpressionValues);
   
-    float vpredelay = newExpressionValues[0];
-    float vmix = newExpressionValues[1];
-    float vdecay = newExpressionValues[2];
+    //float vpredelay = newExpressionValues[0];
+    float vmix = newExpressionValues[0];
+    float vdecay = newExpressionValues[1];
+    float vdamp = newExpressionValues[2];
     //float vmoddepth = newExpressionValues[3];
     //float vmodspeed = newExpressionValues[3];
     float overdrivePostAmount = newExpressionValues[3]; // HERE:
     float overdrivePreAmount = newExpressionValues[4]; // HERE:
-    float vdamp = newExpressionValues[5];
+    float overdriveOutVolume = newExpressionValues[5];
 
     if (pmix != vmix) {
         if (knobMoved(pmix, vmix)) {
@@ -294,15 +295,18 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         }
     }
 
-    if (knobMoved(ppredelay, vpredelay)) {
-        ppredelay = vpredelay;
-    }
 
     if (knobMoved(pdecay, vdecay)) {
         pdecay = vdecay;
     }
 
-    /*if (knobMoved(pmoddepth, vmoddepth)) {
+    // Need to implement this for outputVolume
+    /*
+        if (knobMoved(ppredelay, vpredelay)) {
+        ppredelay = vpredelay;
+    }
+    
+    if (knobMoved(pmoddepth, vmoddepth)) {
         pmoddepth = vmoddepth;
     }
 
@@ -351,8 +355,8 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         float rightOutput = 0.0f;
 
         if(driveActive == true) {
-            reverb_in_L = overdrivePre.Process(  (inputL) ) * drivePreLevelCompensantion;
-            reverb_in_R = overdrivePre2.Process( (inputR) ) * drivePreLevelCompensantion;
+            reverb_in_L = overdrivePre.Process(  (inputL) ) * drivePreLevelCompensantion * overdriveOutVolume;
+            reverb_in_R = overdrivePre2.Process( (inputR) ) * drivePreLevelCompensantion * overdriveOutVolume;
         } else {
             reverb_in_L = inputL;
             reverb_in_R = inputR;
