@@ -15,6 +15,7 @@
 
 #include <q/support/literals.hpp>
 #include <q/fx/biquad.hpp>
+#include <q/fx/lowpass.hpp>
 #include "Util/Multirate.h"
 #include "Util/OctaveGeneratorSingle.h"
 namespace q = cycfi::q;
@@ -65,6 +66,8 @@ static OctaveGeneratorSingle octave(sample_rate_temp / resample_factor);
 static q::highshelf eq1(-20, 100_Hz, sample_rate_temp);
 static q::lowshelf eq2(5, 160_Hz, sample_rate_temp);
 static q::lowshelf eq3(-11, 160_Hz, sample_rate_temp);
+//static q::lowpass LPfilter(160_Hz, sample_rate_temp, 1); // lowpass(frequency f, float sps, double q = 0.707)
+static q::reso_filter LPfilter(2000_Hz, .2f, sample_rate_temp); //reso_filter(frequency f, float reso, float sps)
 float buff[6];
 float buff_out[6];
 int bin_counter = 0;
@@ -315,7 +318,8 @@ static void AudioCallback(AudioHandle::InputBuffer in,
     }*/
 
     if (knobMoved(pdamp, vdamp)) {
-        reverb.setInputFilterHighCutoffPitch(10. - (7. * vdamp));
+        //reverb.setInputFilterHighCutoffPitch(10. - (7. * vdamp));
+        LPfilter.cutoff ( (50_Hz + (vdamp * 2000_Hz)) , sample_rate_temp);
         pdamp = vdamp;
     }
 
@@ -404,8 +408,8 @@ static void AudioCallback(AudioHandle::InputBuffer in,
         reverb.process(reverb_in_L + octaveOutL, reverb_in_R + octaveOutR);
         effectLeftOut = reverb.getLeftOutput();  
         effectRightOut = reverb.getRightOutput();
-        effectLeftOut =  overdrivePost.Process(  eq3(effectLeftOut) )  * drivePostLevelCompensantion;
-        effectRightOut = overdrivePost2.Process( eq3(effectRightOut) ) * drivePostLevelCompensantion;
+        effectLeftOut =  LPfilter( overdrivePost.Process(  eq3(effectLeftOut)  ) ) * drivePostLevelCompensantion;
+        effectRightOut = LPfilter( overdrivePost2.Process( eq3(effectRightOut) ) ) * drivePostLevelCompensantion;
 
         if(reverbActive == true) {
             leftOutput =  inputL * dryMix + effectLeftOut * wetMix;
@@ -489,12 +493,12 @@ int main(void)
     reverb.setTimeScale(2.0);
     reverb.setPreDelay(0.0);
     reverb.setInputFilterLowCutoffPitch(0.0);
-    reverb.setInputFilterHighCutoffPitch(10.0);
+    reverb.setInputFilterHighCutoffPitch(15.0);
     reverb.enableInputDiffusion(true);
     reverb.setDecay(0.5);
     reverb.setTankDiffusion(0.7);
     reverb.setTankFilterLowCutFrequency(0.0);
-    reverb.setTankFilterHighCutFrequency(10.0);
+    reverb.setTankFilterHighCutFrequency(15.0);
     reverb.setTankModSpeed(1.0);
     reverb.setTankModDepth(0.0);
     reverb.setTankModShape(0.5);
