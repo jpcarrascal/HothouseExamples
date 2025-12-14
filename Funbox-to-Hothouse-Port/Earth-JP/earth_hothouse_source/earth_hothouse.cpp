@@ -16,7 +16,7 @@
 #include <q/support/literals.hpp>
 #include <q/fx/biquad.hpp>
 #include "Util/Multirate.h"
-#include "Util/OctaveGenerator.h"
+#include "Util/OctaveGeneratorSingle.h"
 namespace q = cycfi::q;
 using namespace q::literals;
 
@@ -61,7 +61,7 @@ bool justExitedFreezeHold = false;
 static Decimator2 decimate;
 static Interpolator interpolate;
 static const auto sample_rate_temp = 48000;
-static OctaveGenerator octave(sample_rate_temp / resample_factor);
+static OctaveGeneratorSingle octave(sample_rate_temp / resample_factor);
 static q::highshelf eq1(-20, 100_Hz, sample_rate_temp);
 static q::lowshelf eq2(5, 160_Hz, sample_rate_temp);
 static q::lowshelf eq3(-11, 160_Hz, sample_rate_temp);
@@ -373,7 +373,7 @@ static void AudioCallback(AudioHandle::InputBuffer in,
                     std::span<const float, resample_factor> in_chunk(&(buff[0]), resample_factor);
                     const auto sample = decimate(in_chunk); 
                     octave.update(sample);
-                    float octave_mix = octave.up1() * 2.0f * addOctave;
+                    float octave_mix = octave.up1() * 2.0f * addOctave * addOctave; // Mix in 1x or 3x octave up
                     
                     auto out_chunk = interpolate(octave_mix);
                     for (size_t j = 0; j < out_chunk.size(); ++j) {
@@ -523,7 +523,7 @@ int main(void)
     pdecay = 0.5f;
     pmoddepth = 0.1f;
     pmodspeed = 0.5f;
-    ppredelay = 0.5f;
+    ppredelay = 0.0f;
     
     for(int i = 0; i < 6; i++) {
         knobValues[i] = 0.5f;
