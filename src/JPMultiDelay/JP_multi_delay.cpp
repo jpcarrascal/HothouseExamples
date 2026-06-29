@@ -20,13 +20,13 @@
 
 // It's fair to call this code 'obfuscated'; it's been left (mostly) as-is.
 
-#include "daisysp-lgpl.h"
+
 #include "daisysp.h"
 #include "hothouse.h"
 
-using namespace clevelandmusicco;
-using namespace daisysp;
-using namespace daisy;
+//using namespace clevelandmusicco;
+//using namespace daisysp;
+//using namespace daisy;
 
 #define MAX_DELAY static_cast<size_t>(48000 * 2.0f)
 
@@ -37,7 +37,10 @@ using daisy::Parameter;
 using daisy::SaiHandle;
 using daisy::System;
 using daisysp::DelayLine;
+using daisysp::Oscillator;
+using daisysp::Svf;
 using daisysp::fonepole;
+using daisysp::fclamp;
 
 Hothouse hw;
 DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMems[2];
@@ -51,7 +54,7 @@ struct delay {
   float delayTarget;
   float feedback;
   float delSend;
-  float f_freq;
+
  
   float Process(float in) {
     // set delay times
@@ -65,23 +68,19 @@ struct delay {
   }
 };
 
+enum outputMode {
+  MISO = 0,
+  STEREO = 1,
+  MONO = 2
+};
+
 delay delays[2];
 Parameter d_delay, d_feedback, d_level, p_freq, p_res, mod_freq;
-
-float feedback, volume;
 
 // Bypass vars
 Led led_bypass;
 bool bypass = true;
-
-void InitDelays(float samplerate) {
-  for (int i = 0; i < 2; i++) {
-    // Init delays
-    delMems[i].Init();
-    delays[i].del = &delMems[i];
-    // 2 delay times
-  }
-}
+outputMode currentOutputMode = MISO;
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
                    size_t size) {
@@ -101,9 +100,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   }
 
   int filterType = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_1);
-  static const float lfoDepthValues[] = {.15f, .45f, .9f};
-  float lfoDepth = lfoDepthValues[hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_1)];
-  int outputMode = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
+  static const float lfoDepthValues[] = {.0f, .9f, 2.0f};
+  float lfoDepth = lfoDepthValues[hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2)];
 
   float lfo = filterLfo.Process();
   float modCutoff = baseCutoff * powf(2.0f, lfoDepth * lfo);
@@ -111,14 +109,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   
 
   // footswitch
-  bypass ^= hw.switches[7].RisingEdge();
+  bypass ^= hw.switches[Hothouse::FOOTSWITCH_2].RisingEdge();
 
   for (size_t i = 0; i < size; ++i) {
 
 
     // Remove this for full stereo input
     float input[2] = {in[0][i], in[1][i]};
-    if(outputMode == 0) {
+    if(currentOutputMode == MISO) {
       input[1] = in[0][i];
     }
     float mix[2] = {0, 0};
@@ -156,6 +154,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
 int main() {
   hw.Init();
+
+  if(hw.switches[Hothouse::FOOTSWITCH_1].Pressed()) {
+    currentOutputMode = STEREO;
+  }
+
   hw.SetAudioBlockSize(4);  // Number of samples handled per callback
   hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
@@ -165,14 +168,14 @@ int main() {
   d_level.Init(hw.knobs[2], 0.0f, 1.0f, Parameter::LINEAR);
   p_freq.Init(hw.knobs[Hothouse::KNOB_4], 200.0f, 20000.0f,
               Parameter::LOGARITHMIC);
-  //p_freq.Init(hw.knobs[Hothouse::KNOB_4], 0.0f, .497f,
-  //            Parameter::LOGARITHMIC);
   p_res.Init(hw.knobs[Hothouse::KNOB_5], 0.0f, 0.9f, Parameter::LINEAR);
-  mod_freq.Init(hw.knobs[Hothouse::KNOB_6], 0.0f, 10.0f, Parameter::EXPONENTIAL);
-
-  InitDelays(hw.AudioSampleRate());
+  mod_freq.Init(hw.knobs[Hothouse::KNOB_6], 0.0f, 100.0f, Parameter::EXPONENTIAL);
 
   for (int i = 0; i < 2; i++) {
+    // Init delays:
+    delMems[i].Init();
+    delays[i].del = &delMems[i];
+    // Init filters: 
     svfFilter[i].Init(hw.AudioSampleRate());
     svfFilter[i].SetFreq(p_freq.Process());
     svfFilter[i].SetRes(p_res.Process());
