@@ -1,10 +1,10 @@
 # Project Name
-TARGET = basic_multi_delay
+TARGET = JP_multi_delay
 
 USE_DAISYSP_LGPL=1
 
 # Sources and Hothouse header files
-CPP_SOURCES = basic_multi_delay.cpp ../hothouse.cpp
+CPP_SOURCES = JP_multi_delay.cpp ../hothouse.cpp
 C_INCLUDES = -I..
 
 # Library Locations
