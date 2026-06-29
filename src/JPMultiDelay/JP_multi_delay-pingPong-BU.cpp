@@ -51,34 +51,6 @@ enum outputMode {
   MONO = 2
 };
 
-// Plays a delay line back-to-front in overlapping grains instead of reading
-// it forward. Grain depth must stay <= MAX_DELAY/2: the read sweeps from 0 up
-// to 2x grain length, so anything longer would wrap into already-overwritten
-// buffer content.
-struct GrainReverser {
-  float grainLength = 1.0f;
-  float phaseA = 0.0f;
-  float phaseB = 0.0f;
-
-  void Advance(float grainLengthTarget) {
-    fonepole(grainLength, fclamp(grainLengthTarget, 1.0f, MAX_DELAY / 2 - 1), 0.0002f);
-    float cycle = 2.0f * grainLength;
-
-    phaseA += 2.0f;
-    if(phaseA >= cycle) phaseA -= cycle;
-
-    phaseB = phaseA + grainLength;
-    if(phaseB >= cycle) phaseB -= cycle;
-  }
-
-  float Read(DelayLine<float, MAX_DELAY> *del) {
-    float cycle = 2.0f * grainLength;
-    float gainA = sinf(PI_F * phaseA / cycle);
-    float gainB = sinf(PI_F * phaseB / cycle);
-    return gainA * del->Read(phaseA) + gainB * del->Read(phaseB);
-  }
-};
-
 struct pingPongDelay {
   DelayLine<float, MAX_DELAY> *del1;
   DelayLine<float, MAX_DELAY> *del2;
@@ -87,24 +59,15 @@ struct pingPongDelay {
   float feedback;
   float delaySend;
 
-
-  std::pair<float, float> Process(float in1, float in2, outputMode currentOutputMode,
-                                   bool reverseCompound, GrainReverser *reverser) {
+ 
+  std::pair<float, float> Process(float in1, float in2, outputMode currentOutputMode) {
     // set delay times
     fonepole(currentDelay, delayTarget, 0.0002f);
+    del1->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
+    del2->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
 
-    float read1, read2;
-    if(reverseCompound) {
-      reverser->Advance(delayTarget);
-      read1 = reverser->Read(del1);
-      read2 = reverser->Read(del2);
-    } else {
-      del1->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
-      del2->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
-      read1 = del1->Read();
-      read2 = del2->Read();
-    }
-
+    float read1 = del1->Read();
+    float read2 = del2->Read();
     if(outputMode::MISO == currentOutputMode) {
       del1->Write((feedback * read2) + in1 * delaySend);
       del2->Write((feedback * read1));
@@ -118,8 +81,6 @@ struct pingPongDelay {
 };
 
 pingPongDelay ppDelay;
-DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dryCapture[2];
-GrainReverser compoundReverser, oneShotReverser;
 Parameter d_delay, d_feedback, d_level, p_freq, p_res, mod_freq;
 
 // Bypass vars
@@ -324,12 +285,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   static const float lfoDepthValues[] = {.0f, .9f, 2.0f};
   float lfoDepth = lfoDepthValues[hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2)];
 
-  // UP: normal delay. MIDDLE: every repeat keeps re-reversing (reads del1/del2
-  // directly). DOWN: only the fresh input is reversed once; repeats echo it forward.
-  Hothouse::ToggleswitchPosition reverseSwitch = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
-  bool reverseCompound = reverseSwitch == Hothouse::TOGGLESWITCH_MIDDLE;
-  bool reverseOneShot  = reverseSwitch == Hothouse::TOGGLESWITCH_DOWN;
-
   float lfo = filterLfo.Process();
   float modCutoff = baseCutoff * powf(2.0f, lfoDepth * lfo);
   modCutoff = fclamp(modCutoff, 20.0f, 12000.0f);
@@ -357,20 +312,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         delayInputR = 0.0f;
     }
 
-    // Always keep the capture buffer warm so DOWN mode has real history the
-    // instant the switch is flipped, instead of reversing silence.
-    dryCapture[0].Write(delayInputL);
-    dryCapture[1].Write(delayInputR);
-
-    if(reverseOneShot)
-    {
-        oneShotReverser.Advance(ppDelay.delayTarget);
-        delayInputL = oneShotReverser.Read(&dryCapture[0]);
-        delayInputR = oneShotReverser.Read(&dryCapture[1]);
-    }
-
-    sig = ppDelay.Process(delayInputL, delayInputR, currentOutputMode,
-                          reverseCompound, &compoundReverser);
+    sig = ppDelay.Process(delayInputL, delayInputR, currentOutputMode);
 
     if(!std::isfinite(sig.first))  sig.first  = 0.0f;
     if(!std::isfinite(sig.second)) sig.second = 0.0f;
@@ -452,8 +394,7 @@ int main() {
   for (int i = 0; i < 2; i++) {
     // Init delays:
     delMems[i].Init();
-    dryCapture[i].Init();
-    // Init filters:
+    // Init filters: 
     svfFilter[i].Init(hw.AudioSampleRate());
     svfFilter[i].SetFreq(p_freq.Process());
     svfFilter[i].SetRes(p_res.Process());
