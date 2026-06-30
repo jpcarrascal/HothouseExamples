@@ -579,7 +579,7 @@ int main() {
   f_freq.Init(hw.knobs[Hothouse::KNOB_4], 200.0f, 20000.0f,
               Parameter::LOGARITHMIC);
   f_res.Init(hw.knobs[Hothouse::KNOB_5], 0.0f, 0.9f, Parameter::LINEAR);
-  mod_freq.Init(hw.knobs[Hothouse::KNOB_6], 0.0f, 100.0f, Parameter::EXPONENTIAL);
+  mod_freq.Init(hw.knobs[Hothouse::KNOB_6], 0.0f, 100.0f, Parameter::CUBE);
 
   for (int i = 0; i < 2; i++) {
     // Init delays:
