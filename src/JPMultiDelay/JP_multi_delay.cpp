@@ -25,7 +25,8 @@
 #include "hothouse.h"
 #include <cmath>
 
-#define MAX_DELAY static_cast<size_t>(48000 * 2.0f)
+#define DELAY_BUFFER_SIZE static_cast<size_t>(48000 * 4.0f)
+#define MAX_DELAY_SAMPLES (48000 * 2.0f)
 
 using clevelandmusicco::Hothouse;
 using daisy::AudioHandle;
@@ -40,7 +41,7 @@ using daisysp::fonepole;
 using daisysp::fclamp;
 
 Hothouse hw;
-DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMems[2];
+DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS delMems[2];
 
 static daisysp::Svf svfFilter[2];
 static Oscillator filterLfo;
@@ -52,7 +53,7 @@ enum outputMode {
 };
 
 // Plays a delay line back-to-front in overlapping grains instead of reading
-// it forward. Grain depth must stay <= MAX_DELAY/2: the read sweeps from 0 up
+// it forward. Grain depth must stay <= DELAY_BUFFER_SIZE/2: the read sweeps from 0 up
 // to 2x grain length, so anything longer would wrap into already-overwritten
 // buffer content.
 struct GrainReverser {
@@ -63,7 +64,7 @@ struct GrainReverser {
   float gainB  = 0.0f;
 
   void Advance(float grainLengthTarget) {
-    fonepole(grainLength, fclamp(grainLengthTarget, 1.0f, MAX_DELAY / 2 - 1), 0.0002f);
+    fonepole(grainLength, fclamp(grainLengthTarget, 1.0f, DELAY_BUFFER_SIZE / 2 - 1), 0.0002f);
     float cycle = 2.0f * grainLength;
 
     phaseA += 2.0f;
@@ -76,14 +77,46 @@ struct GrainReverser {
     gainB = sinf(PI_F * phaseB / cycle);
   }
 
-  float Read(DelayLine<float, MAX_DELAY> *del) {
+  float Read(DelayLine<float, DELAY_BUFFER_SIZE> *del) {
     return gainA * del->Read(phaseA) + gainB * del->Read(phaseB);
   }
 };
 
+// Plays a delay line faster than real time, transposing pitch upward.
+// Phase [0,1) advances at (pitchRatio-1)/grainLength per sample; delay sweeps
+// from grainLength down to 0 so buffer depth needed is only grainLength.
+struct GrainPitchShifter {
+  float grainLength = 1.0f;
+  float phase = 0.0f;
+  float gainA  = 0.0f;
+  float gainB  = 0.0f;
+  float delayA = 0.0f;
+  float delayB = 0.0f;
+
+  void Advance(float grainLengthTarget, float pitchRatio) {
+    fonepole(grainLength, fclamp(grainLengthTarget, 1.0f, MAX_DELAY_SAMPLES), 0.0002f);
+
+    phase += (pitchRatio - 1.0f) / grainLength;
+    if(phase >= 1.0f) phase -= 1.0f;
+
+    float phaseB = phase + 0.5f;
+    if(phaseB >= 1.0f) phaseB -= 1.0f;
+
+    delayA = grainLength * (1.0f - phase);
+    delayB = grainLength * (1.0f - phaseB);
+    gainA  = sinf(PI_F * phase);
+    gainB  = sinf(PI_F * phaseB);
+  }
+
+  float Read(DelayLine<float, DELAY_BUFFER_SIZE> *del) {
+    return gainA * del->Read(fclamp(delayA, 0.0f, DELAY_BUFFER_SIZE - 1))
+         + gainB * del->Read(fclamp(delayB, 0.0f, DELAY_BUFFER_SIZE - 1));
+  }
+};
+
 struct PingPongDelay {
-  DelayLine<float, MAX_DELAY> *del1;
-  DelayLine<float, MAX_DELAY> *del2;
+  DelayLine<float, DELAY_BUFFER_SIZE> *del1;
+  DelayLine<float, DELAY_BUFFER_SIZE> *del2;
   float currentDelay;
   float delayTarget;
   float feedback;
@@ -101,8 +134,8 @@ struct PingPongDelay {
       read1 = reverser->Read(del1);
       read2 = reverser->Read(del2);
     } else {
-      del1->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
-      del2->SetDelay(fclamp(currentDelay, 0.0f, MAX_DELAY - 1));
+      del1->SetDelay(fclamp(currentDelay, 0.0f, DELAY_BUFFER_SIZE - 1));
+      del2->SetDelay(fclamp(currentDelay, 0.0f, DELAY_BUFFER_SIZE - 1));
       read1 = del1->Read();
       read2 = del2->Read();
     }
@@ -120,8 +153,13 @@ struct PingPongDelay {
 };
 
 PingPongDelay ppDelay;
-DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dryCapture[2];
+DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS dryCapture[2];
 GrainReverser compoundReverser, oneShotReverser;
+GrainPitchShifter pitchShifter;
+
+float storedPitchRatio = 1.0f;
+Hothouse::ToggleswitchPosition lastToggle3Pos = Hothouse::TOGGLESWITCH_UP;
+volatile int pitchLayerBlinkCount = 0;
 Parameter d_delay, d_feedback, d_send, f_freq, f_res, mod_freq;
 
 // Bypass vars
@@ -219,7 +257,7 @@ void UpdateButtons()
         float averageTapMs = static_cast<float>(total) / tapIntervalCount;
         tappedDelaySamples = fclamp((averageTapMs * hw.AudioSampleRate()) / 1000.0f,
                       1.0f,
-                      static_cast<float>(MAX_DELAY - 1));
+                      MAX_DELAY_SAMPLES);
         tapTempoActive = true;
         tapDelayKnobBaseline = hw.GetKnobValue(Hothouse::KNOB_1);
         lastTapMs = now;
@@ -267,6 +305,24 @@ void UpdateButtons()
 
       fs2LongPressHandled = false;
   }
+
+  // Hidden modifier: hold FS1 and move TOGGLESWITCH_3 to select transpose interval.
+  // TS3 position is read as pitch when FS1 is held; as delay mode when released.
+  // Cancel any tap registered on this FS1 press so it isn't mistaken for tempo.
+  Hothouse::ToggleswitchPosition currentToggle3 =
+      hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
+  if(currentToggle3 != lastToggle3Pos
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+  {
+    if     (currentToggle3 == Hothouse::TOGGLESWITCH_MIDDLE) storedPitchRatio = 1.5f;
+    else if(currentToggle3 == Hothouse::TOGGLESWITCH_DOWN)   storedPitchRatio = 2.0f;
+    else                                                      storedPitchRatio = 1.0f;
+    tapWaitingForNext    = false;
+    tapTempoActive       = false;
+    tapIntervalCount     = 0;
+    pitchLayerBlinkCount = 6;
+  }
+  lastToggle3Pos = currentToggle3;
 }
 
 void ledBlink(Led& led)
@@ -326,11 +382,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   static const float lfoDepthValues[] = {.0f, .9f, 2.0f};
   float lfoDepth = lfoDepthValues[hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2)];
 
-  // UP: normal delay. MIDDLE: every repeat keeps re-reversing (reads del1/del2
-  // directly). DOWN: only the fresh input is reversed once; repeats echo it forward.
-  Hothouse::ToggleswitchPosition reverseSwitch = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
-  bool reverseOneShot = reverseSwitch == Hothouse::TOGGLESWITCH_MIDDLE;
-  bool reverseCompound = reverseSwitch == Hothouse::TOGGLESWITCH_DOWN;
+  // TOGGLESWITCH_3 always selects delay/reverse mode.
+  // Hold FS1 and move TOGGLESWITCH_3 to update stored transpose (see UpdateButtons).
+  Hothouse::ToggleswitchPosition ts3 = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
+  bool reverseOneShot  = (ts3 == Hothouse::TOGGLESWITCH_MIDDLE);
+  bool reverseCompound = (ts3 == Hothouse::TOGGLESWITCH_DOWN);
 
   float lfo = filterLfo.Process();
   float modCutoff = baseCutoff * powf(2.0f, lfoDepth * lfo);
@@ -369,6 +425,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         oneShotReverser.Advance(ppDelay.delayTarget);
         delayInputL = oneShotReverser.Read(&dryCapture[0]);
         delayInputR = oneShotReverser.Read(&dryCapture[1]);
+    }
+
+    if(storedPitchRatio > 1.0f)
+    {
+        pitchShifter.Advance(ppDelay.delayTarget, storedPitchRatio);
+        delayInputL = pitchShifter.Read(&dryCapture[0]);
+        delayInputR = pitchShifter.Read(&dryCapture[1]);
     }
 
     sig = ppDelay.Process(delayInputL, delayInputR, currentOutputMode,
@@ -439,10 +502,12 @@ int main() {
       currentOutputMode = STEREO;
   }
 
+  lastToggle3Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
+
   hw.SetAudioBlockSize(4);  // Number of samples handled per callback
   hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
-  d_delay.Init(hw.knobs[0], hw.AudioSampleRate() * 0.05, MAX_DELAY,
+  d_delay.Init(hw.knobs[0], hw.AudioSampleRate() * 0.05, MAX_DELAY_SAMPLES,
                    Parameter::LOGARITHMIC);
   d_feedback.Init(hw.knobs[1], 0.0f, 1.0f, Parameter::LINEAR);
   d_send.Init(hw.knobs[2], 0.0f, 1.5f, Parameter::LINEAR);
@@ -484,7 +549,17 @@ int main() {
     }
     led_delay.Update();
 
-    if(tapTempoActive)
+    if(pitchLayerBlinkCount > 0)
+    {
+        static int blinkTick = 0;
+        if(++blinkTick >= 10)
+        {
+            blinkTick = 0;
+            --pitchLayerBlinkCount;
+            led_tap.Set((pitchLayerBlinkCount % 2 == 0) ? 0.0f : 1.0f);
+        }
+    }
+    else if(tapTempoActive)
     {
         led_tap.Set(1.0f);
     }
