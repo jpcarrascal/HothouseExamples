@@ -429,7 +429,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
     if(storedPitchRatio > 1.0f)
     {
-        pitchShifter.Advance(ppDelay.delayTarget, storedPitchRatio);
+        pitchShifter.Advance(hw.AudioSampleRate() * 0.3f, storedPitchRatio);
         delayInputL = pitchShifter.Read(&dryCapture[0]);
         delayInputR = pitchShifter.Read(&dryCapture[1]);
     }
