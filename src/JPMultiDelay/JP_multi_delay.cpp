@@ -181,6 +181,10 @@ enum FilterPosition { FILTER_AFTER, FILTER_BEFORE, FILTER_IN_LOOP };
 FilterPosition storedFilterPosition = FILTER_AFTER;
 Hothouse::ToggleswitchPosition lastToggle2Pos = Hothouse::TOGGLESWITCH_UP;
 
+enum LofiMode { LOFI_OFF, LOFI_MILD, LOFI_HEAVY };
+LofiMode storedLofiMode = LOFI_OFF;
+Hothouse::ToggleswitchPosition lastToggle1Pos = Hothouse::TOGGLESWITCH_UP;
+
 volatile int pitchLayerBlinkCount = 0;
 Parameter d_delay, d_feedback, d_send, f_freq, f_res, mod_freq;
 
@@ -361,6 +365,22 @@ void UpdateButtons()
     pitchLayerBlinkCount = 6;
   }
   lastToggle2Pos = currentToggle2;
+
+  // Hidden modifier: hold FS1 and move TOGGLESWITCH_1 to select lo-fi mode.
+  Hothouse::ToggleswitchPosition currentToggle1 =
+      hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_1);
+  if(currentToggle1 != lastToggle1Pos
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+  {
+    if     (currentToggle1 == Hothouse::TOGGLESWITCH_UP)     storedLofiMode = LOFI_OFF;
+    else if(currentToggle1 == Hothouse::TOGGLESWITCH_MIDDLE) storedLofiMode = LOFI_MILD;
+    else                                                      storedLofiMode = LOFI_HEAVY;
+    tapWaitingForNext    = false;
+    tapTempoActive       = false;
+    tapIntervalCount     = 0;
+    pitchLayerBlinkCount = 6;
+  }
+  lastToggle1Pos = currentToggle1;
 }
 
 void ledBlink(Led& led)
@@ -432,6 +452,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   
   UpdateButtons();
 
+  // Lo-fi parameters — precomputed once per block.
+  // MILD: N=2 (effective 24kHz), 8-bit. HEAVY: N=4 (effective 12kHz), 4-bit.
+  const int   lofiN      = (storedLofiMode == LOFI_HEAVY) ? 4 : 2;
+  const float lofiLevels = (storedLofiMode == LOFI_HEAVY) ? 15.0f : 255.0f;
+
   for (size_t i = 0; i < size; ++i) {
 
 
@@ -497,6 +522,23 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
     if(!std::isfinite(sig.first))  sig.first  = 0.0f;
     if(!std::isfinite(sig.second)) sig.second = 0.0f;
+
+    if(storedLofiMode != LOFI_OFF)
+    {
+      static int   lofiCounter = 0;
+      static float lofiHeldL   = 0.0f;
+      static float lofiHeldR   = 0.0f;
+      if(++lofiCounter >= lofiN)
+      {
+        lofiCounter = 0;
+        lofiHeldL   = fclamp(sig.first,  -1.0f, 1.0f);
+        lofiHeldR   = fclamp(sig.second, -1.0f, 1.0f);
+        lofiHeldL   = roundf(lofiHeldL * lofiLevels) / lofiLevels;
+        lofiHeldR   = roundf(lofiHeldR * lofiLevels) / lofiLevels;
+      }
+      sig.first  = lofiHeldL;
+      sig.second = lofiHeldR;
+    }
 
     if(storedFilterPosition == FILTER_AFTER)
     {
@@ -568,6 +610,7 @@ int main() {
 
   lastToggle3Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
   lastToggle2Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2);
+  lastToggle1Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_1);
 
   hw.SetAudioBlockSize(4);  // Number of samples handled per callback
   hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
