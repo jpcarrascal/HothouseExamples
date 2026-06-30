@@ -59,6 +59,8 @@ struct GrainReverser {
   float grainLength = 1.0f;
   float phaseA = 0.0f;
   float phaseB = 0.0f;
+  float gainA  = 0.0f;
+  float gainB  = 0.0f;
 
   void Advance(float grainLengthTarget) {
     fonepole(grainLength, fclamp(grainLengthTarget, 1.0f, MAX_DELAY / 2 - 1), 0.0002f);
@@ -69,17 +71,17 @@ struct GrainReverser {
 
     phaseB = phaseA + grainLength;
     if(phaseB >= cycle) phaseB -= cycle;
+
+    gainA = sinf(PI_F * phaseA / cycle);
+    gainB = sinf(PI_F * phaseB / cycle);
   }
 
   float Read(DelayLine<float, MAX_DELAY> *del) {
-    float cycle = 2.0f * grainLength;
-    float gainA = sinf(PI_F * phaseA / cycle);
-    float gainB = sinf(PI_F * phaseB / cycle);
     return gainA * del->Read(phaseA) + gainB * del->Read(phaseB);
   }
 };
 
-struct pingPongDelay {
+struct PingPongDelay {
   DelayLine<float, MAX_DELAY> *del1;
   DelayLine<float, MAX_DELAY> *del2;
   float currentDelay;
@@ -117,10 +119,10 @@ struct pingPongDelay {
   }
 };
 
-pingPongDelay ppDelay;
+PingPongDelay ppDelay;
 DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dryCapture[2];
 GrainReverser compoundReverser, oneShotReverser;
-Parameter d_delay, d_feedback, d_level, p_freq, p_res, mod_freq;
+Parameter d_delay, d_feedback, d_send, f_freq, f_res, mod_freq;
 
 // Bypass vars
 Led led_delay, led_tap;
@@ -284,8 +286,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   hw.ProcessAllControls();
 
 
-  float baseCutoff = p_freq.Process();
-  float res = p_res.Process();
+  float baseCutoff = f_freq.Process();
+  float res = f_res.Process();
   float lfoRate = mod_freq.Process();
   filterLfo.SetFreq(lfoRate);
 
@@ -300,7 +302,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   {
       feedbackFromKnob = 1.0f;
   }
-  float delaySendFromKnob = d_level.Process();
+  float delaySendFromKnob = d_send.Process();
   float delayKnobPosition = hw.GetKnobValue(Hothouse::KNOB_1);
 
   if (tapTempoActive
@@ -327,8 +329,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   // UP: normal delay. MIDDLE: every repeat keeps re-reversing (reads del1/del2
   // directly). DOWN: only the fresh input is reversed once; repeats echo it forward.
   Hothouse::ToggleswitchPosition reverseSwitch = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
-  bool reverseCompound = reverseSwitch == Hothouse::TOGGLESWITCH_MIDDLE;
-  bool reverseOneShot  = reverseSwitch == Hothouse::TOGGLESWITCH_DOWN;
+  bool reverseOneShot = reverseSwitch == Hothouse::TOGGLESWITCH_MIDDLE;
+  bool reverseCompound = reverseSwitch == Hothouse::TOGGLESWITCH_DOWN;
 
   float lfo = filterLfo.Process();
   float modCutoff = baseCutoff * powf(2.0f, lfoDepth * lfo);
@@ -443,10 +445,10 @@ int main() {
   d_delay.Init(hw.knobs[0], hw.AudioSampleRate() * 0.05, MAX_DELAY,
                    Parameter::LOGARITHMIC);
   d_feedback.Init(hw.knobs[1], 0.0f, 1.0f, Parameter::LINEAR);
-  d_level.Init(hw.knobs[2], 0.0f, 1.0f, Parameter::LINEAR);
-  p_freq.Init(hw.knobs[Hothouse::KNOB_4], 200.0f, 20000.0f,
+  d_send.Init(hw.knobs[2], 0.0f, 1.5f, Parameter::LINEAR);
+  f_freq.Init(hw.knobs[Hothouse::KNOB_4], 200.0f, 20000.0f,
               Parameter::LOGARITHMIC);
-  p_res.Init(hw.knobs[Hothouse::KNOB_5], 0.0f, 0.9f, Parameter::LINEAR);
+  f_res.Init(hw.knobs[Hothouse::KNOB_5], 0.0f, 0.9f, Parameter::LINEAR);
   mod_freq.Init(hw.knobs[Hothouse::KNOB_6], 0.0f, 100.0f, Parameter::EXPONENTIAL);
 
   for (int i = 0; i < 2; i++) {
@@ -455,8 +457,8 @@ int main() {
     dryCapture[i].Init();
     // Init filters:
     svfFilter[i].Init(hw.AudioSampleRate());
-    svfFilter[i].SetFreq(p_freq.Process());
-    svfFilter[i].SetRes(p_res.Process());
+    svfFilter[i].SetFreq(f_freq.Process());
+    svfFilter[i].SetRes(f_res.Process());
   }
   ppDelay.del1 = &delMems[0];
   ppDelay.del2 = &delMems[1];
