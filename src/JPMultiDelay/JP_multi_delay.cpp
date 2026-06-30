@@ -21,6 +21,7 @@
 
 #include "daisysp.h"
 #include "hothouse.h"
+#include "util/PersistentStorage.h"
 #include <cmath>
 
 #define DELAY_BUFFER_SIZE static_cast<size_t>(48000 * 4.0f)
@@ -40,6 +41,16 @@ using daisysp::fonepole;
 using daisysp::fclamp;
 
 Hothouse hw;
+
+struct RigSettings {
+  bool monoInput;
+  bool monoOutput;
+  bool operator!=(const RigSettings &o) const {
+    return monoInput != o.monoInput || monoOutput != o.monoOutput;
+  }
+};
+daisy::PersistentStorage<RigSettings> storage(hw.seed.qspi);
+
 DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS delMems[2];
 
 static daisysp::Svf svfFilter[2];
@@ -117,7 +128,7 @@ struct PingPongDelay {
   float delaySend;
 
 
-  std::pair<float, float> Process(float in1, float in2, bool stereoInput,
+  std::pair<float, float> Process(float in1, float in2, bool monoInput,
                                    bool reverseCompound, GrainReverser *reverser,
                                    daisysp::Svf *inLoopFilters = nullptr, int inLoopFilterType = 0) {
     // set delay times
@@ -136,9 +147,9 @@ struct PingPongDelay {
     }
 
     float writeL = (feedback * read2) + in1 * delaySend;
-    float writeR = stereoInput
-                     ? (feedback * read1) + in2 * delaySend
-                     : (feedback * read1);
+    float writeR = monoInput
+                     ? (feedback * read1)
+                     : (feedback * read1) + in2 * delaySend;
 
     if(inLoopFilters) {
       inLoopFilters[0].Process(writeL);
@@ -196,8 +207,9 @@ float tapDelayKnobBaseline = 0.0f;
 
 const float DELAY_KNOB_TAP_CANCEL_THRESHOLD = 0.005f;
 
-bool stereoInput = false;
+bool monoInput = false;
 bool monoOutput  = false;
+bool pendingSave = false;
 
 void JPCheckResetToBootloader() {
   if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 2000 && hw.switches[Hothouse::FOOTSWITCH_2].TimeHeldMs() >= 2000) {
@@ -424,7 +436,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
 
     float input[2] = {in[0][i], in[1][i]};
-    if(!stereoInput) {
+    if(monoInput) {
       input[0] = in[0][i] + in[1][i];
       input[1] = input[0];
     }
@@ -478,7 +490,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
       }
     }
 
-    sig = ppDelay.Process(delayInputL, delayInputR, stereoInput,
+    sig = ppDelay.Process(delayInputL, delayInputR, monoInput,
                           reverseCompound, &compoundReverser,
                           storedFilterPosition == FILTER_IN_LOOP ? svfFilter : nullptr,
                           filterType);
@@ -521,16 +533,16 @@ int main() {
   // FS2 (left/input side) held at boot → stereo input
   // FS1 (right/output side) held at boot → mono output
   // Both held → stereo input + mono output
-  bool stereoInput_at_boot = false;
+  bool monoInput_at_boot = false;
   bool monoOutput_at_boot  = false;
   unsigned int start = System::GetNow();
 
   while(System::GetNow() - start < 500)
   {
       hw.ProcessDigitalControls();
-      if(hw.switches[Hothouse::FOOTSWITCH_2].Pressed() && !stereoInput_at_boot)
+      if(hw.switches[Hothouse::FOOTSWITCH_2].Pressed() && !monoInput_at_boot)
       {
-          stereoInput_at_boot = true;
+          monoInput_at_boot = true;
           for(int i = 0; i < 3; i++)
           {
               led_delay.Set(1.0f); led_delay.Update();
@@ -553,8 +565,6 @@ int main() {
       System::Delay(2);
   }
 
-  if(stereoInput_at_boot) stereoInput = true;
-  if(monoOutput_at_boot)  monoOutput  = true;
 
   lastToggle3Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
   lastToggle2Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2);
@@ -591,6 +601,24 @@ int main() {
   filterLfo.SetAmp(1.0f);
   filterLfo.SetFreq(mod_freq.Process());
 
+  // Load persisted rig settings, falling back to defaults on first boot.
+  // Boot gestures toggle the stored value so repeated holds cycle the setting.
+  RigSettings defaults{false, false};
+  storage.Init(defaults);
+  RigSettings &saved = storage.GetSettings();
+  monoInput  = saved.monoInput;
+  monoOutput = saved.monoOutput;
+
+  if(monoInput_at_boot)  { monoInput  = !monoInput;  pendingSave = true; }
+  if(monoOutput_at_boot) { monoOutput = !monoOutput; pendingSave = true; }
+
+  // Prevent FS2 held during boot from triggering freeze or bypass toggle
+  // when audio starts and UpdateButtons() first runs.
+  if(monoInput_at_boot) {
+    fs2LongPressHandled      = true;
+    fs2SuppressReleaseToggle = true;
+  }
+
   hw.StartAdc();
   hw.StartAudio(AudioCallback);
 
@@ -624,6 +652,15 @@ int main() {
         led_tap.Set(0.0f);
     }
     led_tap.Update();
+
+    if(pendingSave)
+    {
+      RigSettings &s = storage.GetSettings();
+      s.monoInput = monoInput;
+      s.monoOutput  = monoOutput;
+      storage.Save();
+      pendingSave = false;
+    }
 
     System::Delay(10);
     JPCheckResetToBootloader(); // Requires both FSs, Less likely to be hit accidentally
