@@ -18,8 +18,6 @@
 // switches, and pins are directly accessed without enums, so look at hothouse.h
 // to decipher the mappings.
 
-// It's fair to call this code 'obfuscated'; it's been left (mostly) as-is.
-
 
 #include "daisysp.h"
 #include "hothouse.h"
@@ -27,6 +25,7 @@
 
 #define DELAY_BUFFER_SIZE static_cast<size_t>(48000 * 4.0f)
 #define MAX_DELAY_SAMPLES (48000 * 2.0f)
+#define PITCH_GRAIN_MULTIPLIER 0.9f  // Grain length as a fraction of sample rate; adjust to taste
 
 using clevelandmusicco::Hothouse;
 using daisy::AudioHandle;
@@ -46,11 +45,6 @@ DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS delMems[2];
 static daisysp::Svf svfFilter[2];
 static Oscillator filterLfo;
 
-enum outputMode {
-  MISO = 0,
-  STEREO = 1,
-  MONO = 2
-};
 
 // Plays a delay line back-to-front in overlapping grains instead of reading
 // it forward. Grain depth must stay <= DELAY_BUFFER_SIZE/2: the read sweeps from 0 up
@@ -123,8 +117,9 @@ struct PingPongDelay {
   float delaySend;
 
 
-  std::pair<float, float> Process(float in1, float in2, outputMode currentOutputMode,
-                                   bool reverseCompound, GrainReverser *reverser) {
+  std::pair<float, float> Process(float in1, float in2, bool stereoInput,
+                                   bool reverseCompound, GrainReverser *reverser,
+                                   daisysp::Svf *inLoopFilters = nullptr, int inLoopFilterType = 0) {
     // set delay times
     fonepole(currentDelay, delayTarget, 0.0002f);
 
@@ -140,13 +135,23 @@ struct PingPongDelay {
       read2 = del2->Read();
     }
 
-    if(outputMode::MISO == currentOutputMode) {
-      del1->Write((feedback * read2) + in1 * delaySend);
-      del2->Write((feedback * read1));
-    } else {
-      del1->Write((feedback * read2) + in1 * delaySend);
-      del2->Write((feedback * read1) + in2 * delaySend);
+    float writeL = (feedback * read2) + in1 * delaySend;
+    float writeR = stereoInput
+                     ? (feedback * read1) + in2 * delaySend
+                     : (feedback * read1);
+
+    if(inLoopFilters) {
+      inLoopFilters[0].Process(writeL);
+      inLoopFilters[1].Process(writeR);
+      switch(inLoopFilterType) {
+        case 0: writeL = inLoopFilters[0].Low();  writeR = inLoopFilters[1].Low();  break;
+        case 1: writeL = inLoopFilters[0].Band(); writeR = inLoopFilters[1].Band(); break;
+        case 2: writeL = inLoopFilters[0].High(); writeR = inLoopFilters[1].High(); break;
+      }
     }
+
+    del1->Write(writeL);
+    del2->Write(writeR);
 
     return {read1, read2};
   }
@@ -154,11 +159,17 @@ struct PingPongDelay {
 
 PingPongDelay ppDelay;
 DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS dryCapture[2];
+DelayLine<float, DELAY_BUFFER_SIZE> DSY_SDRAM_BSS reversedCapture[2];
 GrainReverser compoundReverser, oneShotReverser;
 GrainPitchShifter pitchShifter;
 
 float storedPitchRatio = 1.0f;
 Hothouse::ToggleswitchPosition lastToggle3Pos = Hothouse::TOGGLESWITCH_UP;
+
+enum FilterPosition { FILTER_AFTER, FILTER_BEFORE, FILTER_IN_LOOP };
+FilterPosition storedFilterPosition = FILTER_AFTER;
+Hothouse::ToggleswitchPosition lastToggle2Pos = Hothouse::TOGGLESWITCH_UP;
+
 volatile int pitchLayerBlinkCount = 0;
 Parameter d_delay, d_feedback, d_send, f_freq, f_res, mod_freq;
 
@@ -185,7 +196,8 @@ float tapDelayKnobBaseline = 0.0f;
 
 const float DELAY_KNOB_TAP_CANCEL_THRESHOLD = 0.005f;
 
-outputMode currentOutputMode = MISO;
+bool stereoInput = false;
+bool monoOutput  = false;
 
 void JPCheckResetToBootloader() {
   if(hw.switches[Hothouse::FOOTSWITCH_1].TimeHeldMs() >= 2000 && hw.switches[Hothouse::FOOTSWITCH_2].TimeHeldMs() >= 2000) {
@@ -307,8 +319,6 @@ void UpdateButtons()
   }
 
   // Hidden modifier: hold FS1 and move TOGGLESWITCH_3 to select transpose interval.
-  // TS3 position is read as pitch when FS1 is held; as delay mode when released.
-  // Cancel any tap registered on this FS1 press so it isn't mistaken for tempo.
   Hothouse::ToggleswitchPosition currentToggle3 =
       hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
   if(currentToggle3 != lastToggle3Pos
@@ -323,6 +333,22 @@ void UpdateButtons()
     pitchLayerBlinkCount = 6;
   }
   lastToggle3Pos = currentToggle3;
+
+  // Hidden modifier: hold FS1 and move TOGGLESWITCH_2 to select filter position.
+  Hothouse::ToggleswitchPosition currentToggle2 =
+      hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2);
+  if(currentToggle2 != lastToggle2Pos
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+  {
+    if     (currentToggle2 == Hothouse::TOGGLESWITCH_UP)     storedFilterPosition = FILTER_AFTER;
+    else if(currentToggle2 == Hothouse::TOGGLESWITCH_MIDDLE) storedFilterPosition = FILTER_BEFORE;
+    else                                                      storedFilterPosition = FILTER_IN_LOOP;
+    tapWaitingForNext    = false;
+    tapTempoActive       = false;
+    tapIntervalCount     = 0;
+    pitchLayerBlinkCount = 6;
+  }
+  lastToggle2Pos = currentToggle2;
 }
 
 void ledBlink(Led& led)
@@ -397,13 +423,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   for (size_t i = 0; i < size; ++i) {
 
 
-    // Remove this for full stereo input
     float input[2] = {in[0][i], in[1][i]};
-    if(currentOutputMode == MISO) {
+    if(!stereoInput) {
       input[0] = in[0][i] + in[1][i];
       input[1] = input[0];
     }
-    std::pair<float, float> mix = {0, 0};
     std::pair<float, float> sig = {0, 0};
 
     float delayInputL = input[0];
@@ -415,8 +439,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         delayInputR = 0.0f;
     }
 
-    // Always keep the capture buffer warm so DOWN mode has real history the
-    // instant the switch is flipped, instead of reversing silence.
+    // dryCapture holds raw dry input for oneShotReverser.
+    // reversedCapture holds oneShotReverser output (or dry if not in reverse),
+    // so pitchShifter can chain after the reverser in all modes.
     dryCapture[0].Write(delayInputL);
     dryCapture[1].Write(delayInputR);
 
@@ -427,46 +452,64 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         delayInputR = oneShotReverser.Read(&dryCapture[1]);
     }
 
+    reversedCapture[0].Write(delayInputL);
+    reversedCapture[1].Write(delayInputR);
+
     if(storedPitchRatio > 1.0f)
     {
-        pitchShifter.Advance(hw.AudioSampleRate() * 0.3f, storedPitchRatio);
-        delayInputL = pitchShifter.Read(&dryCapture[0]);
-        delayInputR = pitchShifter.Read(&dryCapture[1]);
+        pitchShifter.Advance(hw.AudioSampleRate() * PITCH_GRAIN_MULTIPLIER, storedPitchRatio);
+        delayInputL = pitchShifter.Read(&reversedCapture[0]);
+        delayInputR = pitchShifter.Read(&reversedCapture[1]);
     }
-
-    sig = ppDelay.Process(delayInputL, delayInputR, currentOutputMode,
-                          reverseCompound, &compoundReverser);
-
-    if(!std::isfinite(sig.first))  sig.first  = 0.0f;
-    if(!std::isfinite(sig.second)) sig.second = 0.0f;
 
     for (int d = 0; d < 2; d++) {
       svfFilter[d].SetFreq(modCutoff);
       svfFilter[d].SetRes(res);
     }
-    svfFilter[0].Process(sig.first);
-    svfFilter[1].Process(sig.second);
 
-    switch(filterType) {
-      case 0: // LP
-        sig = {svfFilter[0].Low(), svfFilter[1].Low()};
-        break;
-      case 1: // BP
-        sig = {svfFilter[0].Band(), svfFilter[1].Band()};
-        break;
-      case 2: // HP
-        sig = {svfFilter[0].High(), svfFilter[1].High()};
-        break;
+    if(storedFilterPosition == FILTER_BEFORE)
+    {
+      svfFilter[0].Process(delayInputL);
+      svfFilter[1].Process(delayInputR);
+      switch(filterType) {
+        case 0: delayInputL = svfFilter[0].Low();  delayInputR = svfFilter[1].Low();  break;
+        case 1: delayInputL = svfFilter[0].Band(); delayInputR = svfFilter[1].Band(); break;
+        case 2: delayInputL = svfFilter[0].High(); delayInputR = svfFilter[1].High(); break;
+      }
     }
 
-    // Guard filtered wet before mixing
+    sig = ppDelay.Process(delayInputL, delayInputR, stereoInput,
+                          reverseCompound, &compoundReverser,
+                          storedFilterPosition == FILTER_IN_LOOP ? svfFilter : nullptr,
+                          filterType);
+
     if(!std::isfinite(sig.first))  sig.first  = 0.0f;
     if(!std::isfinite(sig.second)) sig.second = 0.0f;
-    mix = {sig.first + input[0], sig.second + input[1]};
 
+    if(storedFilterPosition == FILTER_AFTER)
+    {
+      svfFilter[0].Process(sig.first);
+      svfFilter[1].Process(sig.second);
+      switch(filterType) {
+        case 0: sig = {svfFilter[0].Low(),  svfFilter[1].Low()};  break;
+        case 1: sig = {svfFilter[0].Band(), svfFilter[1].Band()}; break;
+        case 2: sig = {svfFilter[0].High(), svfFilter[1].High()}; break;
+      }
+      if(!std::isfinite(sig.first))  sig.first  = 0.0f;
+      if(!std::isfinite(sig.second)) sig.second = 0.0f;
+    }
 
-    out[0][i] = mix.first;
-    out[1][i] = mix.second;
+    if(monoOutput)
+    {
+      float monoWet = (sig.first + sig.second) * 0.5f;
+      out[0][i] = monoWet + input[0];
+      out[1][i] = monoWet + input[1];
+    }
+    else
+    {
+      out[0][i] = sig.first  + input[0];
+      out[1][i] = sig.second + input[1];
+    }
   }
 }
 
@@ -475,34 +518,46 @@ int main() {
   led_delay.Init(hw.seed.GetPin(Hothouse::LED_2), false);
   led_tap.Init(hw.seed.GetPin(Hothouse::LED_1), false);
 
-  bool stereo_at_boot = false;
+  // FS2 (left/input side) held at boot → stereo input
+  // FS1 (right/output side) held at boot → mono output
+  // Both held → stereo input + mono output
+  bool stereoInput_at_boot = false;
+  bool monoOutput_at_boot  = false;
   unsigned int start = System::GetNow();
 
-  while(System::GetNow() - start < 500) // 500 ms detection window
+  while(System::GetNow() - start < 500)
   {
       hw.ProcessDigitalControls();
-      if(hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+      if(hw.switches[Hothouse::FOOTSWITCH_2].Pressed() && !stereoInput_at_boot)
       {
-          stereo_at_boot = true;
+          stereoInput_at_boot = true;
           for(int i = 0; i < 3; i++)
           {
-              led_tap.Set(1.0f);
-              led_tap.Update();
+              led_delay.Set(1.0f); led_delay.Update();
               System::Delay(100);
-              led_tap.Set(0.0f);
-              led_tap.Update();
+              led_delay.Set(0.0f); led_delay.Update();
+              System::Delay(100);
+          }
+      }
+      if(hw.switches[Hothouse::FOOTSWITCH_1].Pressed() && !monoOutput_at_boot)
+      {
+          monoOutput_at_boot = true;
+          for(int i = 0; i < 3; i++)
+          {
+              led_tap.Set(1.0f); led_tap.Update();
+              System::Delay(100);
+              led_tap.Set(0.0f); led_tap.Update();
               System::Delay(100);
           }
       }
       System::Delay(2);
   }
 
-  if(stereo_at_boot)
-  {
-      currentOutputMode = STEREO;
-  }
+  if(stereoInput_at_boot) stereoInput = true;
+  if(monoOutput_at_boot)  monoOutput  = true;
 
   lastToggle3Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
+  lastToggle2Pos = hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2);
 
   hw.SetAudioBlockSize(4);  // Number of samples handled per callback
   hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
@@ -520,6 +575,7 @@ int main() {
     // Init delays:
     delMems[i].Init();
     dryCapture[i].Init();
+    reversedCapture[i].Init();
     // Init filters:
     svfFilter[i].Init(hw.AudioSampleRate());
     svfFilter[i].SetFreq(f_freq.Process());
