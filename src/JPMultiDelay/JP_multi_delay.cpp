@@ -193,6 +193,7 @@ Led led_delay, led_tap;
 bool delayActive = false;
 bool freeze = false;
 bool freezeHold = false;
+bool sendGateOpen = false;
 
 bool fs2LongPressHandled = false;
 bool fs2SuppressReleaseToggle = false;
@@ -251,7 +252,7 @@ void UpdateButtons()
     tapIntervalCount = 0;
   }
 
-  if (hw.switches[Hothouse::FOOTSWITCH_1].RisingEdge())
+  if (!freezeHold && hw.switches[Hothouse::FOOTSWITCH_1].RisingEdge())
   {
     if (!tapWaitingForNext)
     {
@@ -293,6 +294,8 @@ void UpdateButtons()
     }
   }
 
+  sendGateOpen = freezeHold && hw.switches[Hothouse::FOOTSWITCH_1].Pressed();
+
   // - Short press (on release) toggles delayActive when freezeHold is off
   // - Long press always enters freezeHold
   // - Short press while freezeHold is on exits freezeHold, keeps delayActive unchanged
@@ -312,10 +315,12 @@ void UpdateButtons()
 
   if (hw.switches[Hothouse::FOOTSWITCH_2].Pressed()
       && hw.switches[Hothouse::FOOTSWITCH_2].TimeHeldMs() >= FS2_HOLD_MS
-      && !fs2LongPressHandled)
+      && !fs2LongPressHandled
+      && delayActive)
   {
-      freezeHold = true;
-      freeze = true;
+      freezeHold    = true;
+      freeze        = true;
+      sendGateOpen  = false;
       fs2LongPressHandled = true;
   }
 
@@ -338,7 +343,8 @@ void UpdateButtons()
   Hothouse::ToggleswitchPosition currentToggle3 =
       hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_3);
   if(currentToggle3 != lastToggle3Pos
-     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed()
+     && !freezeHold)
   {
     if     (currentToggle3 == Hothouse::TOGGLESWITCH_MIDDLE) storedPitchRatio = 1.5f;
     else if(currentToggle3 == Hothouse::TOGGLESWITCH_DOWN)   storedPitchRatio = 2.0f;
@@ -354,7 +360,8 @@ void UpdateButtons()
   Hothouse::ToggleswitchPosition currentToggle2 =
       hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_2);
   if(currentToggle2 != lastToggle2Pos
-     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed()
+     && !freezeHold)
   {
     if     (currentToggle2 == Hothouse::TOGGLESWITCH_UP)     storedFilterPosition = FILTER_AFTER;
     else if(currentToggle2 == Hothouse::TOGGLESWITCH_MIDDLE) storedFilterPosition = FILTER_BEFORE;
@@ -370,7 +377,8 @@ void UpdateButtons()
   Hothouse::ToggleswitchPosition currentToggle1 =
       hw.GetToggleswitchPosition(Hothouse::TOGGLESWITCH_1);
   if(currentToggle1 != lastToggle1Pos
-     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed())
+     && hw.switches[Hothouse::FOOTSWITCH_1].Pressed()
+     && !freezeHold)
   {
     if     (currentToggle1 == Hothouse::TOGGLESWITCH_UP)     storedLofiMode = LOFI_OFF;
     else if(currentToggle1 == Hothouse::TOGGLESWITCH_MIDDLE) storedLofiMode = LOFI_MILD;
@@ -430,8 +438,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   float knobDelayTarget = d_delay.Process();
   ppDelay.delayTarget = tapTempoActive ? tappedDelaySamples : knobDelayTarget;
 
-  // Option B: delayActive always controls input feed
-  ppDelay.delaySend = delayActive ? delaySendFromKnob : 0.0f;
+  bool sendBlocked = freeze && !sendGateOpen;
+  ppDelay.delaySend = (delayActive && !sendBlocked) ? delaySendFromKnob : 0.0f;
 
   // Freeze controls loop behavior
   ppDelay.feedback = freeze ? 1.0f : feedbackFromKnob;
@@ -676,7 +684,11 @@ int main() {
     }
     led_delay.Update();
 
-    if(pitchLayerBlinkCount > 0)
+    if(freezeHold)
+    {
+        led_tap.Set(sendGateOpen ? 1.0f : 0.0f);
+    }
+    else if(pitchLayerBlinkCount > 0)
     {
         static int blinkTick = 0;
         if(++blinkTick >= 10)
