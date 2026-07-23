@@ -24,8 +24,8 @@
 #include "util/PersistentStorage.h"
 #include <cmath>
 
-#define DELAY_BUFFER_SIZE static_cast<size_t>(48000 * 4.0f)
-#define MAX_DELAY_SAMPLES (48000 * 2.0f)
+#define DELAY_BUFFER_SIZE static_cast<size_t>(48000 * 10.0f)
+#define MAX_DELAY_SAMPLES (48000 * 10.0f)
 #define PITCH_GRAIN_MULTIPLIER 0.9f  // Grain length as a fraction of sample rate; adjust to taste
 
 using clevelandmusicco::Hothouse;

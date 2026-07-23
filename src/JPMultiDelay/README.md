@@ -2,6 +2,9 @@
 
 A stereo ping-pong delay with a modulated filter, reverse delay modes, granular pitch transposition, and lo-fi degradation. Heavily extended from the original `petal/MultiDelay` DaisyExamples port.
 
+### How to build:
+make clean; make ; make program-dfu
+
 ---
 
 ## Controls
@@ -10,7 +13,7 @@ A stereo ping-pong delay with a modulated filter, reverse delay modes, granular 
 
 | Knob | Function | Notes |
 |---|---|---|
-| KNOB 1 | Delay time | 50ms–2s, logarithmic. Also the baseline for tap tempo. |
+| KNOB 1 | Delay time | 50ms–10s, logarithmic. Also the baseline for tap tempo. |
 | KNOB 2 | Feedback | 0–100%. Values above 95% snap to exactly 100% for a stable infinite loop. |
 | KNOB 3 | Send level | How much dry signal feeds into the delay. |
 | KNOB 4 | Filter cutoff | 200Hz–20kHz, logarithmic. |
